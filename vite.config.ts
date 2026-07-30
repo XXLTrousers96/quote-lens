@@ -10,6 +10,9 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  preview: {
+    allowedHosts: true, // Allow Railway deployments and custom domain hosting
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

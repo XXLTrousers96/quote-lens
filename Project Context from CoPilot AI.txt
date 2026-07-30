@@ -1,0 +1,433 @@
+QuoteLens — Project Handoff Brief
+
+1. Context & Owner
+
+Owner: Sr. Sales Rep, Internal Wholesale at Lincoln Financial (life insurance carrier).
+Users: Internal Lincoln wholesalers / their advisor-facing teammates.
+Distribution model: Internal Lincoln tenant only. Likely SharePoint or an internal static host. Not public. Not hosted SaaS.
+Compliance posture (critical): Illustration data is sensitive. The app must be architected so that:
+CSV parsing happens 100% client-side in the browser.
+Zero data leaves the user's machine (no fetch/XHR to external services, no telemetry, no analytics, no third-party CDNs at runtime).
+Zero persistence — nothing in localStorage, sessionStorage, cookies, or IndexedDB. Refresh = clean slate.
+Build output must be pure static HTML/JS/CSS so it can be dropped into a SharePoint doc library or internal static server.
+2. What the App Does (v1)
+
+Name: QuoteLens
+
+Purpose: Wholesalers currently build advisor-facing comparison tables in Excel by hand from carrier illustration CSVs. This app automates the ingestion, categorization, and calculation, and produces a copy-pasteable table that lands cleanly in Outlook.
+
+Two-phase workflow:
+
+Upload page (/) — Drag-and-drop multiple CSVs → auto-parsed, auto-categorized, listed in a session table with per-row remove and Clear All.
+Analysis page (/analysis) — A dropdown selects an "output module" (v1 has one: Premium & MOIC). The module renders the deliverable table with Copy for Email and Download CSV buttons.
+Session-only: Everything lives in React context in memory. No login, no accounts, no shared state, no persistence.
+
+3. Tech Stack
+
+Vite + React + TypeScript
+Tailwind CSS (v4 style — configured via @import "tailwindcss" in CSS)
+Shadcn UI components (Button, Card, Dialog, Table, etc.)
+react-router-dom for / and /analysis
+lucide-react for icons
+@tanstack/react-query available but not needed for v1 (no async data)
+d3 available but v1 does not use charts — deliverable is a table, not a viz
+Do not add new npm dependencies unless necessary. The user wants a minimal footprint for the compliance conversation.
+
+4. Data Model — Lincoln WealthPreserve 2 IUL CSVs
+
+All four sample CSVs share identical structure. The schema below is derived from the raw files:
+
+Header row (verbatim):
+
+"Year","Age","Total Payment","After Tax Outlay","Account Value","Surrender Value","Death Benefit","Fixed Interest Rate","Indexed Interest Rate"
+
+Parser quirks to handle:
+
+Files may have BOM.
+Line endings can be \r\n.
+Header cells are quoted; data cells are not.
+Every data row has a trailing comma — i.e. there's an empty 10th field. A naive .split(',') produces a 10-element array; be defensive.
+Percent columns (Fixed Interest Rate, Indexed Interest Rate) contain % suffixes like 3.50%. Strip and store as decimal (0.035).
+Currency-style cells in the samples don't have $ or ,, but future carriers might — strip defensively.
+Skip blank rows.
+Sample data snapshot (from the four provided files):
+
+File
+
+Issue Age
+
+Annual Prem (Y1)
+
+Face Amount (Y1 DB)
+
+Pay Pattern
+
+Lincoln WealthPreserve 2 IUL (2020) - 021323.csv
+
+64
+
+$42,834
+
+$1,000,000
+
+10 full years, then $0
+
+... (1).csv
+
+64
+
+$170,896
+
+$4,000,000
+
+10 full years, then $0
+
+... (2).csv
+
+64
+
+$62,184
+
+$1,000,000
+
+8 full years @ $62,184 + partial 9th year @ $60,147
+
+... (3).csv
+
+64
+
+$248,735
+
+$4,000,000
+
+8 full years @ $248,735 + partial 9th year @ $237,231
+
+Notable behavior: In files (2) and (3), Death Benefit steps up above the level face amount starting around age 84. Files (.) and (1) keep DB level at face until the end. This affects MOIC calculations.
+
+5. Auto-Categorization Rules
+
+Applied at parse time. Each ingested illustration gets these derived fields stored alongside the raw rows:
+
+carrier — First word of the filename (after stripping extension, trailing date markers like - 021323, and dedup suffixes like (1), (2), (3)).
+product — Everything after the first word of the cleaned filename. For the samples: "WealthPreserve 2 IUL (2020)".
+payPeriodLabel — Count consecutive Year-1+ rows where Total Payment > 0, stop at first 0. Then:
+1 → "Single Pay"
+N → "N Pay" (e.g., "9 Pay", "10 Pay")
+If premiums continue past age 100 → "Full Pay"
+Important: A partial payment (like the $60,147 in year 9 of file (2)) counts as a payment. So file (2) → "9 Pay", not "8 Pay".
+issueAge — Age at Year 1.
+faceAmount — Death Benefit at Year 1.
+annualPremium — Total Payment at Year 1.
+totalPremium — Sum of Total Payment across all rows.
+paymentsToAge90 — Count of rows where age ≤ 90 AND Total Payment > 0.
+6. The Deliverable Table (Premium & MOIC output module)
+
+This is the whole point of the app. The user showed a screenshot of what they build by hand in Excel. Reproduce it as closely as possible.
+
+Columns (in this exact order):
+
+Product Name
+
+Annual Premium
+
+# Payments to Age 90
+
+Total Premium to Age 90
+
+Premium as % of Face
+
+MOIC
+
+Calculations (all anchored to a referenceAge variable, defaulting to 90):
+
+Total Premium to Age {ref} = Σ Total Payment where age ≤ ref
+# Payments to Age {ref} = count of years where age ≤ ref AND Total Payment > 0
+Premium as % of Face = Total Premium to Age {ref} ÷ faceAmount
+MOIC = Death Benefit at age {ref} ÷ Total Premium to Age {ref}
+If no exact row at age = ref, use the closest row where age ≤ ref and set a hasWarning: true flag on that row.
+Reference age is a first-class state value — bake it into the context from day one (referenceAge, setReferenceAge, default 90). The user wants to expose a "change target age" input in a future iteration. Don't hardcode 90 anywhere except as the default.
+
+Formatting:
+
+Currency: $1,234,567 (whole dollars, thousands separators, no decimals)
+Percent: whole numbers, e.g. 43%
+MOIC: one decimal + x, e.g. 5.2x. Undefined → —
+Expected output for the four sample files at age 90:
+
+Product
+
+Annual Prem
+
+# Pmts to 90
+
+Total Prem to 90
+
+% of Face
+
+MOIC
+
+Lincoln WealthPreserve 2 IUL (2020) — 10 Pay
+
+$42,834
+
+10
+
+$428,340
+
+43%
+
+2.3x
+
+Lincoln WealthPreserve 2 IUL (2020) — 10 Pay
+
+$170,896
+
+10
+
+$1,708,960
+
+43%
+
+2.3x
+
+Lincoln WealthPreserve 2 IUL (2020) — 9 Pay
+
+$62,184
+
+9
+
+$557,619
+
+56%
+
+2.6x
+
+Lincoln WealthPreserve 2 IUL (2020) — 9 Pay
+
+$248,735
+
+9
+
+$2,227,111
+
+56%
+
+2.6x
+
+(Note the 9-pay illustrations have DB step-ups, so MOIC uses whichever DB is on the age-90 row.)
+
+Visual style (must match the user's Excel screenshot):
+
+Black or deep-navy header row, white bold text.
+Product Name column: soft gray background (slate-100-ish).
+"Premium as % of Face" column: deep navy background, white bold text.
+MOIC column: light blue background, dark text.
+Solid borders on every cell. Right-aligned numeric columns. Standard font stack.
+7. Two Export Actions (both live above the table)
+
+A. "Copy for Email" button — the star feature
+
+Approach: Modern Clipboard API ClipboardItem writing both text/html and text/plain in one op, with fallbacks.
+
+Critical Outlook-safety rules for the HTML:
+
+Every style must be an inline style="..." attribute. No <style> tags. No classes.
+Solid colors only. No gradients, no rgba with transparency, no box-shadow.
+Every <td> and <th> must have explicit border, padding, color, background-color, font-family, font-size inline.
+Belt-and-suspenders: also set legacy HTML attributes: border="1", bgcolor="...", cellspacing="0", cellpadding="0".
+No <html>, <head>, or <body> wrapper — just a bare <table> fragment.
+Standard font stack: Arial, Helvetica, sans-serif.
+Plain-text fallback = tab-separated values so if HTML is stripped, the paste is still legible.
+Architecture tip: Define all colors/borders/paddings once as a style object exported from a premium-moic-styles.ts file. Both the on-screen table (via style={...} on JSX elements) and the clipboard HTML builder (via string concat into inline attributes) should read from the same object. This guarantees the paste looks exactly like the on-screen preview.
+
+UX:
+
+On click: build export → write to clipboard → show inline green success banner "Copied. Paste into Outlook, Gmail, or Word to preserve styling."
+Button icon flips from Copy to Check with "Copied" label for ~3.5s, then resets.
+Error path: inline red banner with the error message.
+Fallback chain: ClipboardItem → navigator.clipboard.writeText → hidden textarea + execCommand('copy').
+B. "Download CSV" button
+
+Raw numeric values, no formatting (no $, no %, no x suffix). Let the recipient's Excel format however they want.
+Header row matches the on-screen column labels (with {ref} substituted, so headers say "Total Premium to Age 90" etc.).
+Filename: quotelens-premium-moic-age{ref}-{yyyymmdd}.csv
+Use Blob + URL.createObjectURL + hidden <a download> click. No dependencies.
+8. File Layout (recommended)
+
+src/
+
+  App.tsx                                  ← Routes + <IllustrationsProvider>
+
+  pages/
+
+    index.tsx                              ← Upload page
+
+    analysis.tsx                           ← Analysis page (renders active output module)
+
+  components/
+
+    app-header.tsx                         ← Top nav (Upload / Analysis links + session-only badge)
+
+    upload-drop-zone.tsx                   ← DnD + click-to-browse
+
+    illustrations-list.tsx                 ← Session table with per-row remove + Clear All dialog
+
+    output-module-selector.tsx             ← Native <select> for switching modules
+
+    ui/                                    ← Shadcn components
+
+  lib/
+
+    illustration-types.ts                  ← Illustration, IllustrationRow types
+
+    illustrations-context.tsx              ← Provider + useIllustrations() hook
+
+    csv-parser.ts                          ← parseCsvText(text, filename) → Illustration
+
+    categorize.ts                          ← categorize(illustration) → adds derived fields
+
+    clipboard.ts                           ← copyHtmlAndText(html, text) with fallbacks
+
+  output-modules/
+
+    types.ts                               ← OutputModule contract
+
+   index.ts                               ← Registry + defaultOutputModuleId
+
+    premium-moic.tsx                       ← The v1 module component
+
+    premium-moic-calcs.ts                  ← computePremiumMoicRow(illustration, refAge)
+
+    premium-moic-format.ts                 ← Currency/percent/MOIC formatters
+
+    premium-moic-styles.ts                 ← Shared style objects (screen + clipboard)
+
+    premium-moic-html-export.ts            ← buildPremiumMoicExport(rows, refAge) → {html, text}
+
+    premium-moic-csv-export.ts             ← buildPremiumMoicCsv(rows, refAge) → string
+
+  index.css                                ← Theme tokens (see below)
+
+9. Output Module Framework (important for extensibility)
+
+The user's stated intent: "in the future there might be a button that switches the output to a completely different concept." So build a plugin-style framework from day one.
+
+output-modules/types.ts:
+
+TypeScript
+
+1
+
+export type OutputModuleProps = {
+
+2
+
+illustrations: Illustration[];
+
+3
+
+referenceAge: number;
+
+4
+
+};
+
+5
+
+ 
+
+6
+
+export type OutputModule = {
+
+7
+
+id: string;
+
+8
+
+label: string;
+
+9
+
+description?: string;
+
+10
+
+Component: React.FC<OutputModuleProps>;
+
+11
+
+};
+
+Show more lines
+
+output-modules/index.ts:
+
+TypeScript
+
+1
+
+import { premiumMoicModule } from './premium-moic';
+
+2
+
+export const outputModules: OutputModule[] = [premiumMoicModule];
+
+3
+
+export const defaultOutputModuleId = outputModules[0].id;
+
+4
+
+export function getOutputModule(id: string) {
+
+5
+
+return outputModules.find(m => m.id === id) ?? outputModules[0];
+
+6
+
+}
+
+Show more lines
+
+Adding a new output = one new file + one line in the registry. The Analysis page doesn't need to change.
+
+10. Theme
+
+Business/financial look. Not playful. Adapt these tokens in index.css for Tailwind v4:
+
+Primary: deep navy (mirrors the Excel deliverable's header row)
+Accent: light blue (mirrors the MOIC highlight column)
+Neutrals: cool slate grays
+Background: white cards on a very light slate page background
+No dark mode. Single theme only.
+11. Loading & Empty States
+
+Upload page: friendly empty state on the illustrations list when nothing is loaded ("Drop CSVs above to get started").
+Analysis page: if illustrations.length === 0, show an empty state with a link back to /.
+Parser errors surface per file with the filename attached, not as a global crash. Green success banner: "Added N illustrations." Red inline error rows with a dismiss button.
+12. Known-Good Decisions (locked in with the user)
+
+✅ MOIC formula: Death Benefit at reference age ÷ Total Premium paid through reference age
+✅ Reference age: default 90, but stored as configurable state from day one
+✅ "9 Pay" for the partial-payment files (any year with payment > 0 counts)
+✅ Session-only, no persistence, no login
+✅ Ship "Copy for Email" (HTML+text clipboard) and "Download CSV" in v1
+✅ Deferred to future iterations: Copy-for-Excel (TSV), .xlsx export, copy-as-image, bar charts, row drill-down into year-by-year data
+13. What to Ask the User Before Building More
+
+Only these are actually open questions:
+
+Filename-based carrier parsing — if they ever get CSVs from a different carrier whose filename doesn't lead with the carrier name, they'll need a manual tag field. Not urgent.
+Additional columns they might want in the deliverable table (e.g., Cash Value at 90, interest rate assumption) — the Excel screenshot only shows six columns, but worth confirming.
+Hosting target — SharePoint doc library vs. an internal static host. This determines the build output config (relative asset paths matter for SharePoint).
+14. Build & Deploy Notes for SharePoint Hosting
+
+If deploying to SharePoint:
+
+Set Vite base: './' in vite.config.ts so asset paths are relative.
+Run vite build → drop the entire dist/ folder contents into a SharePoint doc library.
+Users navigate to index.html in the library. Everything runs client-side from there.
+No server, no API, no backend, no config.
